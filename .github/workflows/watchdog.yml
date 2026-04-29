@@ -1,0 +1,58 @@
+name: Watchdog
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'    # every 5 minutes
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check Yad2 Monitor health
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Get the most recent run of "Yad2 Monitor"
+          last=$(gh run list --workflow check.yml --limit 1 \
+                 --json startedAt,status,conclusion,databaseId \
+                 --jq '.[0]')
+          if [ -z "$last" ] || [ "$last" = "null" ]; then
+            curl -s "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+              --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+              --data-urlencode "text=🚨 Watchdog: no runs of Yad2 Monitor found"
+            exit 0
+          fi
+
+          started=$(echo "$last" | jq -r .startedAt)
+          status=$(echo "$last" | jq -r .status)
+          conclusion=$(echo "$last" | jq -r .conclusion)
+          run_id=$(echo "$last" | jq -r .databaseId)
+
+          last_ts=$(date -d "$started" +%s)
+          now=$(date +%s)
+          age_min=$(( (now - last_ts) / 60 ))
+
+          echo "Last run: $started (${age_min}m ago) | status=$status conclusion=$conclusion"
+
+          # Healthy if started <15 min ago, regardless of in_progress/completed
+          if [ "$age_min" -le 15 ]; then
+            echo "OK - monitor is alive"
+            exit 0
+          fi
+
+          # Older - alert
+          msg="🚨 Watchdog alert: Yad2 Monitor last started ${age_min} min ago (status=${status}, conclusion=${conclusion})"
+          curl -s "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+            --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+            --data-urlencode "text=$msg"
+
+          # Try to wake the main monitor
+          gh workflow run check.yml || true

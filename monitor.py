@@ -147,9 +147,26 @@ def send_telegram(message):
         return False
 
 
+HEARTBEAT_URL = "https://raw.githubusercontent.com/mosh5566/yad2-cloud-monitor/main/heartbeat.txt"
+
+
+def is_local_alive():
+    """Check if local monitor wrote a heartbeat in the last 3 minutes.
+    If yes, the cloud should not send (avoid duplicate notifications)."""
+    try:
+        # Cache-buster to avoid CDN caching old heartbeat
+        r = requests.get(f"{HEARTBEAT_URL}?_t={int(time.time())}", timeout=10)
+        if r.status_code != 200:
+            return False
+        ts = int(r.text.strip())
+        age = time.time() - ts
+        return age < 180  # 3 minutes
+    except Exception:
+        return False
+
+
 def notify(message):
-    """Send through both channels - whichever works delivers."""
-    send_whatsapp(message)
+    """Cloud only sends Telegram (Green API blocks GitHub IPs)."""
     send_telegram(message)
 
 
@@ -233,10 +250,14 @@ def main():
                 if item["id"] not in known_ids and item.get("orderId", 0) > known_max_order
             ]
             if new_listings:
-                log.info(f"[NEW] {len(new_listings)} new (orderId > {known_max_order})")
-                for listing in sorted(new_listings, key=lambda x: x.get("orderId", 0), reverse=True):
-                    log.info(f"[SEND] orderId={listing['orderId']} | {listing['title']} - {listing['price']}")
-                    notify(format_msg(listing))
+                local_alive = is_local_alive()
+                if local_alive:
+                    log.info(f"[SKIP] Local monitor active - not sending {len(new_listings)} ads (avoiding dupes)")
+                else:
+                    log.info(f"[NEW] {len(new_listings)} new (orderId > {known_max_order})")
+                    for listing in sorted(new_listings, key=lambda x: x.get("orderId", 0), reverse=True):
+                        log.info(f"[SEND] orderId={listing['orderId']} | {listing['title']} - {listing['price']}")
+                        notify(format_msg(listing))
                 known_ids |= current_ids
                 if max_order > known_max_order:
                     known_max_order = max_order

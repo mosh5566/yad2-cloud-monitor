@@ -26,8 +26,11 @@ log = logging.getLogger("yad2")
 
 GREEN_API_URL = "https://7103.api.greenapi.com"
 ID_INSTANCE = os.environ.get("ID_INSTANCE", "7103103506")
-API_TOKEN = os.environ["API_TOKEN"]
+API_TOKEN = os.environ.get("API_TOKEN", "")
 PHONE_TO_NOTIFY = os.environ.get("PHONE_TO_NOTIFY", "972526940950")
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 YAD2_BASE_PARAMS = "manufacturer=19&model=10236&year=2016-2022&price=-1-65000&hand=0-3"
 YAD2_URL = f"https://www.yad2.co.il/vehicles/cars?{YAD2_BASE_PARAMS}&Order=5"
@@ -112,6 +115,8 @@ def extract_items(data, items):
 
 
 def send_whatsapp(message):
+    if not API_TOKEN:
+        return False
     url = f"{GREEN_API_URL}/waInstance{ID_INSTANCE}/sendMessage/{API_TOKEN}"
     try:
         r = requests.post(url, json={"chatId": f"{PHONE_TO_NOTIFY}@c.us", "message": message}, timeout=10)
@@ -121,6 +126,31 @@ def send_whatsapp(message):
     except Exception as e:
         log.error(f"[ERR] WhatsApp: {e}")
         return False
+
+
+def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        r = requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": False,
+        }, timeout=10)
+        r.raise_for_status()
+        log.info("[OK] Telegram sent")
+        return True
+    except Exception as e:
+        log.error(f"[ERR] Telegram: {e}")
+        return False
+
+
+def notify(message):
+    """Send through both channels - whichever works delivers."""
+    send_whatsapp(message)
+    send_telegram(message)
 
 
 def format_msg(listing):
@@ -185,7 +215,7 @@ def main():
 
         if first_run:
             log.info(f"[INIT] Got {len(listings)} listings | maxOrderId={max_order}")
-            send_whatsapp(
+            notify(
                 "🟢 *מערכת מעקב יד 2 ענן פעילה!*\n\n"
                 "🔍 טויוטה פריוס 2016-2022\n"
                 "💰 עד 65,000 ₪ | יד 1-3\n"
@@ -206,7 +236,7 @@ def main():
                 log.info(f"[NEW] {len(new_listings)} new (orderId > {known_max_order})")
                 for listing in sorted(new_listings, key=lambda x: x.get("orderId", 0), reverse=True):
                     log.info(f"[SEND] orderId={listing['orderId']} | {listing['title']} - {listing['price']}")
-                    send_whatsapp(format_msg(listing))
+                    notify(format_msg(listing))
                 known_ids |= current_ids
                 if max_order > known_max_order:
                     known_max_order = max_order

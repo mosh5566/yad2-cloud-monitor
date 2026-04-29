@@ -19,9 +19,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPO: ${{ github.repository }}
         run: |
           # Get the most recent run of "Yad2 Monitor"
-          last=$(gh run list --workflow check.yml --limit 1 \
+          last=$(gh run list --repo "$REPO" --workflow check.yml --limit 1 \
                  --json startedAt,status,conclusion,databaseId \
                  --jq '.[0]')
           if [ -z "$last" ] || [ "$last" = "null" ]; then
@@ -55,4 +56,4 @@ jobs:
             --data-urlencode "text=$msg"
 
           # Try to wake the main monitor
-          gh workflow run check.yml || true
+          gh workflow run check.yml --repo "$REPO" || true

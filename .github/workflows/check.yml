@@ -32,6 +32,8 @@ jobs:
           ID_INSTANCE: ${{ secrets.ID_INSTANCE }}
           API_TOKEN: ${{ secrets.API_TOKEN }}
           PHONE_TO_NOTIFY: ${{ secrets.PHONE_TO_NOTIFY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python monitor.py
 
       - name: Commit updated state

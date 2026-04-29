@@ -1,0 +1,47 @@
+name: Yad2 Monitor
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'    # every 5 minutes (GitHub Actions minimum)
+  workflow_dispatch:           # also allow manual run
+
+permissions:
+  contents: write              # needed to commit state.json back
+
+concurrency:
+  group: yad2-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run monitor
+        env:
+          ID_INSTANCE: ${{ secrets.ID_INSTANCE }}
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+          PHONE_TO_NOTIFY: ${{ secrets.PHONE_TO_NOTIFY }}
+        run: python monitor.py
+
+      - name: Commit updated state
+        run: |
+          if git diff --quiet state.json 2>/dev/null; then
+            echo "no state changes"
+            exit 0
+          fi
+          git config user.name "yad2-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state.json
+          git commit -m "update state $(date -u +%H:%M)" || exit 0
+          git push

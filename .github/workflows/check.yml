@@ -8,9 +8,8 @@ on:
 permissions:
   contents: write              # needed to commit state.json back
 
-concurrency:
-  group: yad2-monitor
-  cancel-in-progress: false
+# No concurrency block - allow overlapping runs so cron isn't skipped
+# (state.json conflicts handled via push retry with rebase)
 
 jobs:
   check:

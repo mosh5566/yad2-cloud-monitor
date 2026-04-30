@@ -37,7 +37,8 @@ YAD2_URL = f"https://www.yad2.co.il/vehicles/cars?{YAD2_BASE_PARAMS}&Order=5"
 
 STATE_FILE = "state.json"
 SCAN_INTERVAL = 10           # seconds between scans inside one run
-RUN_DURATION = 4 * 60 + 30   # ~4.5 min, leaves time for setup/commit
+RUN_DURATION = 2 * 60 + 30   # ~2.5 min - short enough that next 5-min cron
+                              #            isn't blocked by an in-progress run
 MAX_FETCH_RETRIES = 3
 
 

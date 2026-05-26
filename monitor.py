@@ -38,15 +38,17 @@ PHONE_TO_NOTIFY = os.environ.get("PHONE_TO_NOTIFY", "972526940950")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-YAD2_BASE_PARAMS = "manufacturer=19&model=10236&year=2016-2020&hand=0-3"
-YAD2_URL = f"https://www.yad2.co.il/vehicles/cars?{YAD2_BASE_PARAMS}&Order=1"
+YAD2_BASE_PARAMS = "manufacturer=19&model=10236&year=2016-2020&price=-1-70000&hand=0-3"
+YAD2_URL = f"https://www.yad2.co.il/vehicles/cars?{YAD2_BASE_PARAMS}&Order=5"
 
 STATE_FILE = "state.json"
 PROXY_FILE = "proxies.txt"
-SCAN_INTERVAL = 8
+SCAN_INTERVAL = 60           # scan once a minute (cost-efficient with paid residential proxy)
 RUN_DURATION = 5 * 60 + 10
 CHROMEDRIVER = os.environ.get("CHROMEDRIVER_PATH", "chromedriver")
 CHROME_BIN = os.environ.get("CHROME_BIN", "")
+# Residential proxy (IPRoyal etc.) as http://user:pass@host:port - set via secret
+RESIDENTIAL_PROXY = os.environ.get("RESIDENTIAL_PROXY", "")
 
 _proxy_idx = 0
 

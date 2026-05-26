@@ -46,6 +46,7 @@ PROXY_FILE = "proxies.txt"
 SCAN_INTERVAL = 8
 RUN_DURATION = 5 * 60 + 10
 CHROMEDRIVER = os.environ.get("CHROMEDRIVER_PATH", "chromedriver")
+CHROME_BIN = os.environ.get("CHROME_BIN", "")
 
 _proxy_idx = 0
 
@@ -84,6 +85,8 @@ def create_driver(proxy=None):
     opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
+    if CHROME_BIN:
+        opts.binary_location = CHROME_BIN
     if proxy:
         opts.add_argument(f"--proxy-server={proxy}")
     service = Service(CHROMEDRIVER)

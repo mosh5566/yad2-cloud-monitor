@@ -24,6 +24,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Set up Chrome + chromedriver
+        id: setup-chrome
         uses: browser-actions/setup-chrome@v1
         with:
           install-chromedriver: true
@@ -49,7 +50,8 @@ jobs:
           PHONE_TO_NOTIFY: ${{ secrets.PHONE_TO_NOTIFY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CHROMEDRIVER_PATH: chromedriver
+          CHROMEDRIVER_PATH: ${{ steps.setup-chrome.outputs.chromedriver-path }}
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
         run: python monitor.py
 
       - name: Commit updated state

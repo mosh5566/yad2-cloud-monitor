@@ -2,7 +2,7 @@ name: Watchdog
 
 on:
   schedule:
-    - cron: '*/5 * * * *'    # every 5 minutes
+    - cron: '*/3 * * * *'    # every 3 minutes
   workflow_dispatch:
 
 permissions:
@@ -16,44 +16,31 @@ jobs:
     steps:
       - name: Check Yad2 Monitor health
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPO: ${{ github.repository }}
         run: |
-          # Get the most recent run of "Yad2 Monitor"
+          # Count active (in_progress) runs - the chain should always have one
+          active=$(gh run list --repo "$REPO" --workflow check.yml --status in_progress \
+                   --json databaseId --jq '. | length' 2>/dev/null || echo 0)
+          echo "Active runs: $active"
+
+          if [ "$active" -ge 1 ]; then
+            echo "OK - chain is alive ($active active)"
+            exit 0
+          fi
+
+          # No active run - check how long since the last one
           last=$(gh run list --repo "$REPO" --workflow check.yml --limit 1 \
-                 --json startedAt,status,conclusion,databaseId \
-                 --jq '.[0]')
-          if [ -z "$last" ] || [ "$last" = "null" ]; then
-            curl -s "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
-              --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
-              --data-urlencode "text=🚨 Watchdog: no runs of Yad2 Monitor found"
-            exit 0
+                 --json startedAt --jq '.[0].startedAt')
+          if [ -n "$last" ] && [ "$last" != "null" ]; then
+            age_min=$(( ($(date +%s) - $(date -d "$last" +%s)) / 60 ))
+            echo "No active runs. Last started ${age_min}m ago - restarting chain"
           fi
 
-          started=$(echo "$last" | jq -r .startedAt)
-          status=$(echo "$last" | jq -r .status)
-          conclusion=$(echo "$last" | jq -r .conclusion)
-          run_id=$(echo "$last" | jq -r .databaseId)
-
-          last_ts=$(date -d "$started" +%s)
-          now=$(date +%s)
-          age_min=$(( (now - last_ts) / 60 ))
-
-          echo "Last run: $started (${age_min}m ago) | status=$status conclusion=$conclusion"
-
-          # Healthy if started <15 min ago, regardless of in_progress/completed
-          if [ "$age_min" -le 15 ]; then
-            echo "OK - monitor is alive"
-            exit 0
-          fi
-
-          # Older - alert
-          msg="🚨 Watchdog alert: Yad2 Monitor last started ${age_min} min ago (status=${status}, conclusion=${conclusion})"
+          # Restart the chain
+          gh workflow run check.yml --repo "$REPO" || true
           curl -s "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
             --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
-            --data-urlencode "text=$msg"
-
-          # Try to wake the main monitor
-          gh workflow run check.yml --repo "$REPO" || true
+            --data-urlencode "text=🔄 Watchdog: chain was down - restarted it" || true

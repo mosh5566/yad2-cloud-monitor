@@ -32,14 +32,17 @@ PHONE_TO_NOTIFY = os.environ.get("PHONE_TO_NOTIFY", "972526940950")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-YAD2_BASE_PARAMS = "manufacturer=19&model=10236&year=2016-2022&price=-1-65000&hand=0-3"
-YAD2_URL = f"https://www.yad2.co.il/vehicles/cars?{YAD2_BASE_PARAMS}&Order=5"
+YAD2_BASE_PARAMS = "manufacturer=19&model=10236&year=2016-2020&hand=0-3"
+YAD2_URL = f"https://www.yad2.co.il/vehicles/cars?{YAD2_BASE_PARAMS}&Order=1"
 
 STATE_FILE = "state.json"
-SCAN_INTERVAL = 10           # seconds between scans inside one run
-RUN_DURATION = 2 * 60 + 30   # ~2.5 min - short enough that next 5-min cron
-                              #            isn't blocked by an in-progress run
+SCAN_INTERVAL = 8            # seconds between scans inside one run
+RUN_DURATION = 5 * 60 + 20   # ~5.3 min - each run scans continuously, then
+                              #            self-triggers the next run (near-instant chain)
 MAX_FETCH_RETRIES = 3
+
+# Israel timezone for accurate listing times
+ISRAEL_TZ_OFFSET = 3 * 3600  # UTC+3 (DST). Listing image timestamps are in local Israel time already.
 
 
 def load_state():
@@ -94,6 +97,11 @@ def extract_items(data, items):
             address = address_obj.get("area") or {} if isinstance(address_obj, dict) else {}
             dates = data.get("vehicleDates", {})
             price = data.get("price", "")
+            # Extract upload timestamp from cover image filename: ..._YYYYMMDDHHMMSS.jpeg
+            meta = data.get("metaData") or {}
+            cover = meta.get("coverImage", "") if isinstance(meta, dict) else ""
+            ts_match = re.search(r"_(\d{14})\.", cover or "")
+            img_ts = ts_match.group(1) if ts_match else ""
             items.append({
                 "id": token,
                 "title": f"{mfr.get('text','')} {model.get('text','')}".strip(),
@@ -104,6 +112,7 @@ def extract_items(data, items):
                 "city": address.get("text", "") if isinstance(address, dict) else "",
                 "link": f"https://www.yad2.co.il/item/{token}",
                 "orderId": data.get("orderId", 0),
+                "imgTs": img_ts,
             })
         else:
             for v in data.values():
@@ -113,6 +122,16 @@ def extract_items(data, items):
         for v in data:
             if isinstance(v, (dict, list)):
                 extract_items(v, items)
+
+
+def fmt_listing_time(img_ts):
+    """Convert YYYYMMDDHHMMSS image timestamp to readable date+time."""
+    if not img_ts or len(img_ts) < 14:
+        return ""
+    try:
+        return f"{img_ts[6:8]}/{img_ts[4:6]}/{img_ts[0:4]} {img_ts[8:10]}:{img_ts[10:12]}:{img_ts[12:14]}"
+    except Exception:
+        return ""
 
 
 def send_whatsapp(message):
@@ -148,37 +167,23 @@ def send_telegram(message):
         return False
 
 
-HEARTBEAT_URL = "https://raw.githubusercontent.com/mosh5566/yad2-cloud-monitor/main/heartbeat.txt"
-
-
-def is_local_alive():
-    """Check if local monitor wrote a heartbeat in the last 3 minutes.
-    If yes, the cloud should not send (avoid duplicate notifications)."""
-    try:
-        # Cache-buster to avoid CDN caching old heartbeat
-        r = requests.get(f"{HEARTBEAT_URL}?_t={int(time.time())}", timeout=10)
-        if r.status_code != 200:
-            return False
-        ts = int(r.text.strip())
-        age = time.time() - ts
-        return age < 180  # 3 minutes
-    except Exception:
-        return False
-
-
 def notify(message):
-    """Cloud only sends Telegram (Green API blocks GitHub IPs)."""
+    """Send via Telegram (primary) and WhatsApp (best-effort; Green API may 403 from cloud)."""
     send_telegram(message)
+    send_whatsapp(message)
 
 
 def format_msg(listing):
-    parts = ["🚗 *מודעה חדשה ביד 2!* (☁️ ענן)", ""]
+    parts = ["🚗 *מודעה חדשה ביד 2!*", ""]
     if listing.get("title"): parts.append(f"📌 {listing['title']}")
     if listing.get("subtitle"): parts.append(f"📋 {listing['subtitle']}")
-    if listing.get("price"): parts.append(f"💰 {listing['price']}")
-    if listing.get("year"): parts.append(f"📅 {listing['year']}")
+    if listing.get("price"): parts.append(f"💰 {listing['price']} ₪")
+    if listing.get("year"): parts.append(f"📅 שנתון: {listing['year']}")
     if listing.get("hand"): parts.append(f"✋ יד: {listing['hand']}")
     if listing.get("city"): parts.append(f"📍 {listing['city']}")
+    upload_time = fmt_listing_time(listing.get("imgTs", ""))
+    if upload_time:
+        parts.append(f"🕐 עלתה: {upload_time}")
     parts.append(f"\n🔗 {listing.get('link','')}")
     return "\n".join(parts)
 
@@ -234,12 +239,12 @@ def main():
         if first_run:
             log.info(f"[INIT] Got {len(listings)} listings | maxOrderId={max_order}")
             notify(
-                "🟢 *מערכת מעקב יד 2 ענן פעילה!*\n\n"
-                "🔍 טויוטה פריוס 2016-2022\n"
-                "💰 עד 65,000 ₪ | יד 1-3\n"
+                "🟢 *מערכת מעקב יד 2 פעילה!*\n\n"
+                "🔍 טויוטה פריוס 2016-2020\n"
+                "✋ יד 1-3\n"
                 f"📊 מודעות: {len(current_ids)}\n"
-                "⏰ בודק כל 10 שניות\n"
-                "☁️ רץ ב-GitHub Actions"
+                "⏰ מעקב מיידי - תוך שניות\n"
+                "☁️ רץ בענן 24/7"
             )
             known_ids = current_ids
             known_max_order = max_order
@@ -251,14 +256,10 @@ def main():
                 if item["id"] not in known_ids and item.get("orderId", 0) > known_max_order
             ]
             if new_listings:
-                local_alive = is_local_alive()
-                if local_alive:
-                    log.info(f"[SKIP] Local monitor active - not sending {len(new_listings)} ads (avoiding dupes)")
-                else:
-                    log.info(f"[NEW] {len(new_listings)} new (orderId > {known_max_order})")
-                    for listing in sorted(new_listings, key=lambda x: x.get("orderId", 0), reverse=True):
-                        log.info(f"[SEND] orderId={listing['orderId']} | {listing['title']} - {listing['price']}")
-                        notify(format_msg(listing))
+                log.info(f"[NEW] {len(new_listings)} new (orderId > {known_max_order})")
+                for listing in sorted(new_listings, key=lambda x: x.get("orderId", 0), reverse=True):
+                    log.info(f"[SEND] orderId={listing['orderId']} | {listing['title']} - {listing['price']} | {listing.get('imgTs','')}")
+                    notify(format_msg(listing))
                 known_ids |= current_ids
                 if max_order > known_max_order:
                     known_max_order = max_order

@@ -1,7 +1,8 @@
 """
-Yad2 Cloud Monitor - GitHub Actions edition
-Each run scans yad2 repeatedly (every 10s) for ~4.5 minutes, then exits.
-GitHub Actions schedules a new run every 10 minutes -> near-continuous coverage.
+Yad2 Cloud Monitor - Selenium + proxy edition (runs on GitHub Actions).
+Uses a real headless Chrome through rotating proxies - the only reliable way
+past yad2's Radware bot protection from a datacenter IP.
+Each run scans for ~5 min, then the workflow chains the next run.
 """
 import os
 import sys
@@ -9,9 +10,10 @@ import io
 import time
 import json
 import re
+import random
 import logging
+import shutil
 import requests
-import cloudscraper
 from datetime import datetime
 
 try:
@@ -24,11 +26,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                     datefmt="%H:%M:%S", stream=sys.stdout)
 log = logging.getLogger("yad2")
 
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+
+# ===== Config =====
 GREEN_API_URL = "https://7103.api.greenapi.com"
 ID_INSTANCE = os.environ.get("ID_INSTANCE", "7103103506")
 API_TOKEN = os.environ.get("API_TOKEN", "")
 PHONE_TO_NOTIFY = os.environ.get("PHONE_TO_NOTIFY", "972526940950")
-
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -36,13 +42,22 @@ YAD2_BASE_PARAMS = "manufacturer=19&model=10236&year=2016-2020&hand=0-3"
 YAD2_URL = f"https://www.yad2.co.il/vehicles/cars?{YAD2_BASE_PARAMS}&Order=1"
 
 STATE_FILE = "state.json"
-SCAN_INTERVAL = 8            # seconds between scans inside one run
-RUN_DURATION = 5 * 60 + 20   # ~5.3 min - each run scans continuously, then
-                              #            self-triggers the next run (near-instant chain)
-MAX_FETCH_RETRIES = 3
+PROXY_FILE = "proxies.txt"
+SCAN_INTERVAL = 8
+RUN_DURATION = 5 * 60 + 10
+CHROMEDRIVER = os.environ.get("CHROMEDRIVER_PATH", "chromedriver")
 
-# Israel timezone for accurate listing times
-ISRAEL_TZ_OFFSET = 3 * 3600  # UTC+3 (DST). Listing image timestamps are in local Israel time already.
+_proxy_idx = 0
+
+
+def load_proxies():
+    try:
+        with open(PROXY_FILE, encoding="utf-8") as f:
+            ps = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+        random.shuffle(ps)
+        return ps
+    except OSError:
+        return []
 
 
 def load_state():
@@ -58,19 +73,42 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def fetch_listings(scraper):
+def create_driver(proxy=None):
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+    if proxy:
+        opts.add_argument(f"--proxy-server={proxy}")
+    service = Service(CHROMEDRIVER)
+    driver = webdriver.Chrome(service=service, options=opts)
+    driver.set_page_load_timeout(25)
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    })
+    return driver
+
+
+def fetch_listings(driver):
     try:
         cache_buster = int(time.time() * 1000)
-        r = scraper.get(f"{YAD2_URL}&_t={cache_buster}", timeout=20)
-        html = r.text
-        if r.status_code != 200 or len(html) < 5000:
-            return None
+        driver.get(f"{YAD2_URL}&_t={cache_buster}")
+        time.sleep(2)
+        html = driver.page_source
         if "captcha" in html.lower() or "ShieldSquare" in html:
+            return "BLOCKED"
+        if len(html) < 5000:
             return "BLOCKED"
         return parse_page(html)
     except Exception as e:
-        log.error(f"[ERR] fetch: {e}")
-        return None
+        log.error(f"[ERR] fetch: {str(e)[:120]}")
+        return "PROXY_DEAD"
 
 
 def parse_page(html):
@@ -97,7 +135,6 @@ def extract_items(data, items):
             address = address_obj.get("area") or {} if isinstance(address_obj, dict) else {}
             dates = data.get("vehicleDates", {})
             price = data.get("price", "")
-            # Extract upload timestamp from cover image filename: ..._YYYYMMDDHHMMSS.jpeg
             meta = data.get("metaData") or {}
             cover = meta.get("coverImage", "") if isinstance(meta, dict) else ""
             ts_match = re.search(r"_(\d{14})\.", cover or "")
@@ -125,13 +162,9 @@ def extract_items(data, items):
 
 
 def fmt_listing_time(img_ts):
-    """Convert YYYYMMDDHHMMSS image timestamp to readable date+time."""
     if not img_ts or len(img_ts) < 14:
         return ""
-    try:
-        return f"{img_ts[6:8]}/{img_ts[4:6]}/{img_ts[0:4]} {img_ts[8:10]}:{img_ts[10:12]}:{img_ts[12:14]}"
-    except Exception:
-        return ""
+    return f"{img_ts[6:8]}/{img_ts[4:6]}/{img_ts[0:4]} {img_ts[8:10]}:{img_ts[10:12]}:{img_ts[12:14]}"
 
 
 def send_whatsapp(message):
@@ -144,31 +177,27 @@ def send_whatsapp(message):
         log.info("[OK] WhatsApp sent")
         return True
     except Exception as e:
-        log.error(f"[ERR] WhatsApp: {e}")
+        log.error(f"[ERR] WhatsApp: {str(e)[:80]}")
         return False
 
 
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        r = requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": False,
+        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
+            "chat_id": TELEGRAM_CHAT_ID, "text": message,
+            "parse_mode": "Markdown", "disable_web_page_preview": False,
         }, timeout=10)
         r.raise_for_status()
         log.info("[OK] Telegram sent")
         return True
     except Exception as e:
-        log.error(f"[ERR] Telegram: {e}")
+        log.error(f"[ERR] Telegram: {str(e)[:80]}")
         return False
 
 
 def notify(message):
-    """Send via Telegram (primary) and WhatsApp (best-effort; Green API may 403 from cloud)."""
     send_telegram(message)
     send_whatsapp(message)
 
@@ -181,94 +210,96 @@ def format_msg(listing):
     if listing.get("year"): parts.append(f"📅 שנתון: {listing['year']}")
     if listing.get("hand"): parts.append(f"✋ יד: {listing['hand']}")
     if listing.get("city"): parts.append(f"📍 {listing['city']}")
-    upload_time = fmt_listing_time(listing.get("imgTs", ""))
-    if upload_time:
-        parts.append(f"🕐 עלתה: {upload_time}")
+    t = fmt_listing_time(listing.get("imgTs", ""))
+    if t:
+        parts.append(f"🕐 עלתה: {t}")
     parts.append(f"\n🔗 {listing.get('link','')}")
     return "\n".join(parts)
 
 
-def make_scraper():
-    return cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "windows", "mobile": False}
-    )
-
-
 def main():
     log.info("=" * 40)
-    log.info("Yad2 Cloud Monitor (GitHub Actions, 10s loop)")
+    log.info("Yad2 Cloud Monitor (Selenium + proxies)")
     log.info("=" * 40)
 
     state = load_state()
     known_ids = set(state.get("known_ids", []))
     known_max_order = state.get("max_order_id", 0)
     first_run = (known_max_order == 0)
-    log.info(f"[STATE] {len(known_ids)} known | maxOrderId={known_max_order}")
+    proxies = load_proxies()
+    log.info(f"[STATE] {len(known_ids)} known | maxOrderId={known_max_order} | proxies={len(proxies)}")
 
-    scraper = make_scraper()
+    if not proxies:
+        log.error("[FATAL] No proxies.txt - run proxy_updater first")
+        return 0
+
+    global _proxy_idx
+    driver = None
     deadline = time.time() + RUN_DURATION
-    scans = 0
-    successes = 0
-    blocked = 0
-    captcha_streak = 0
+    scans = ok = blocked = 0
 
-    while time.time() < deadline:
-        scans += 1
-        listings = fetch_listings(scraper)
+    def new_driver():
+        nonlocal driver
+        if driver:
+            try: driver.quit()
+            except Exception: pass
+        proxy = proxies[_proxy_idx % len(proxies)]
+        return create_driver(proxy=proxy), proxy
 
-        if listings == "BLOCKED":
-            blocked += 1
-            captcha_streak += 1
-            scraper = make_scraper()
-            time.sleep(SCAN_INTERVAL)
-            continue
+    try:
+        driver, cur_proxy = new_driver()
+        log.info(f"[PROXY] {cur_proxy}")
 
-        if not listings:
-            captcha_streak += 1
-            if captcha_streak >= 3:
-                scraper = make_scraper()
-                captcha_streak = 0
-            time.sleep(SCAN_INTERVAL)
-            continue
+        while time.time() < deadline:
+            scans += 1
+            result = fetch_listings(driver)
 
-        captcha_streak = 0
-        successes += 1
-        current_ids = {item["id"] for item in listings}
-        max_order = max((item.get("orderId", 0) for item in listings), default=0)
+            if result in ("BLOCKED", "PROXY_DEAD", None):
+                blocked += 1
+                _proxy_idx += 1
+                try:
+                    driver, cur_proxy = new_driver()
+                    log.info(f"[ROTATE] -> {cur_proxy}")
+                except Exception as e:
+                    log.error(f"[ERR] driver: {str(e)[:80]}")
+                continue
 
-        if first_run:
-            log.info(f"[INIT] Got {len(listings)} listings | maxOrderId={max_order}")
-            notify(
-                "🟢 *מערכת מעקב יד 2 פעילה!*\n\n"
-                "🔍 טויוטה פריוס 2016-2020\n"
-                "✋ יד 1-3\n"
-                f"📊 מודעות: {len(current_ids)}\n"
-                "⏰ מעקב מיידי - תוך שניות\n"
-                "☁️ רץ בענן 24/7"
-            )
-            known_ids = current_ids
-            known_max_order = max_order
-            first_run = False
-            save_state({"known_ids": list(known_ids), "max_order_id": known_max_order})
-        else:
-            new_listings = [
-                item for item in listings
-                if item["id"] not in known_ids and item.get("orderId", 0) > known_max_order
-            ]
-            if new_listings:
-                log.info(f"[NEW] {len(new_listings)} new (orderId > {known_max_order})")
-                for listing in sorted(new_listings, key=lambda x: x.get("orderId", 0), reverse=True):
-                    log.info(f"[SEND] orderId={listing['orderId']} | {listing['title']} - {listing['price']} | {listing.get('imgTs','')}")
-                    notify(format_msg(listing))
-                known_ids |= current_ids
-                if max_order > known_max_order:
-                    known_max_order = max_order
+            ok += 1
+            current_ids = {it["id"] for it in result}
+            max_order = max((it.get("orderId", 0) for it in result), default=0)
+
+            if first_run:
+                log.info(f"[INIT] {len(result)} listings | maxOrderId={max_order}")
+                notify(
+                    "🟢 *מערכת מעקב יד 2 פעילה!*\n\n"
+                    "🔍 טויוטה פריוס 2016-2020\n✋ יד 1-3\n"
+                    f"📊 מודעות: {len(current_ids)}\n"
+                    "⏰ מעקב מיידי - תוך שניות\n☁️ רץ בענן 24/7"
+                )
+                known_ids = current_ids
+                known_max_order = max_order
+                first_run = False
                 save_state({"known_ids": list(known_ids), "max_order_id": known_max_order})
+            else:
+                new_listings = [it for it in result
+                                if it["id"] not in known_ids and it.get("orderId", 0) > known_max_order]
+                if new_listings:
+                    log.info(f"[NEW] {len(new_listings)} new")
+                    for lst in sorted(new_listings, key=lambda x: x.get("orderId", 0), reverse=True):
+                        log.info(f"[SEND] {lst['orderId']} | {lst['title']} {lst['price']} | {lst.get('imgTs','')}")
+                        notify(format_msg(lst))
+                    known_ids |= current_ids
+                    if max_order > known_max_order:
+                        known_max_order = max_order
+                    save_state({"known_ids": list(known_ids), "max_order_id": known_max_order})
 
-        time.sleep(SCAN_INTERVAL)
+            time.sleep(SCAN_INTERVAL)
+    finally:
+        if driver:
+            try: driver.quit()
+            except Exception: pass
 
-    log.info(f"[DONE] scans={scans} ok={successes} blocked={blocked} | maxOrderId={known_max_order}")
-    # Always persist - in case max_order rose without a NEW being sent
+    log.info(f"[DONE] scans={scans} ok={ok} blocked={blocked} | maxOrderId={known_max_order}")
     save_state({"known_ids": list(known_ids), "max_order_id": known_max_order})
     return 0
 
